@@ -25,14 +25,20 @@ func SignAndSubmitTx(hclient horizon.ClientInterface, tx *b.TransactionBuilder, 
 		// Attempt to extract more detailed result information
 		log.Printf("error submitting tx: %s\ntx: %s", submitErr, txstr)
 		var (
-			resultStr string
-			err       error
+			resultCodes *horizon.TransactionResultCodes
+			resultStr   string
+			err         error
 		)
 		if herr, ok := submitErr.(*horizon.Error); ok {
 			resultStr, err = herr.ResultString()
 			if err != nil {
 				log.Print(err, "extracting result string from horizon.Error")
 				resultStr = ""
+			}
+			resultCodes, err = herr.ResultCodes()
+			if err != nil {
+				log.Print(err, "getting result codes from horizon.Error")
+				resultCodes = nil
 			}
 		}
 		if resultStr == "" {
@@ -42,6 +48,11 @@ func SignAndSubmitTx(hclient horizon.ClientInterface, tx *b.TransactionBuilder, 
 			}
 		}
 		log.Println("result string: ", resultStr)
+		if resultCodes == nil {
+			log.Print("cannot locate result codes from failed tx submission")
+		} else {
+			log.Print("result code: ", *resultCodes)
+		}
 	}
 	return &resp, submitErr
 }

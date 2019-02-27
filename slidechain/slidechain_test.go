@@ -267,13 +267,17 @@ func TestImport(t *testing.T) {
 func TestEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	// TODO(debnil): Test non-native assets.
 	var tests = []struct {
-		inputAmount  xlm.Amount
-		exportAmount xlm.Amount
+		assetType    xdr.AssetType
+		code         string
+		issuer       string
+		inputAmount  int64
+		exportAmount int64
 	}{
-		{5 * xlm.Lumen, 5 * xlm.Lumen},
-		{5 * xlm.Lumen, 3 * xlm.Lumen},
+		{xdr.AssetTypeAssetTypeNative, "", "", int64(5 * xlm.Lumen), int64(5 * xlm.Lumen)},
+		{xdr.AssetTypeAssetTypeNative, "", "", int64(5 * xlm.Lumen), int64(3 * xlm.Lumen)},
+		// {xdr.AssetTypeAssetTypeCreditAlphanum4, "USD", importTestAccountID, int64(500), int64(500)},
+		// {xdr.AssetTypeAssetTypeCreditAlphanum12, "USDUSD", importTestAccountID, 5 * xlm.Lumen, 5 * xlm.Lumen},
 	}
 	withTestServer(ctx, t, func(ctx context.Context, db *sql.DB, s *submitter, sv *httptest.Server, ch *protocol.Chain) {
 		hclient := &horizon.Client{
@@ -317,21 +321,18 @@ func TestEndToEnd(t *testing.T) {
 		var exporterPubKeyBytes [32]byte
 		copy(exporterPubKeyBytes[:], exporterPub)
 
-		native := xdr.Asset{
-			Type: xdr.AssetTypeAssetTypeNative,
-		}
-		nativeAssetBytes, err := native.MarshalBinary()
-		if err != nil {
-			t.Fatalf("error marshaling native asset to xdr: %s", err)
-		}
-
 		for _, tt := range tests {
-			// Prepare Stellar account to peg-in funds and txvm account to receive funds.
 			inputAmount := tt.inputAmount
 			exportAmount := tt.exportAmount
+			testAsset := makeAsset(tt.assetType, tt.code, tt.issuer)
+			testAssetBytes, err := testAsset.MarshalBinary()
+			if err != nil {
+				t.Fatalf("error marshaling test asset to xdr: %s", err)
+			}
+			// Prepare Stellar account to peg-in funds and txvm account to receive funds.
 			expMS := int64(bc.Millis(time.Now().Add(10 * time.Minute)))
 			// Build, submit, and wait on pre-peg-in TxVM tx.
-			prepegTx, err := BuildPrepegTx(c.InitBlockHash.Bytes(), nativeAssetBytes, exporterPubKeyBytes[:], int64(inputAmount), expMS)
+			prepegTx, err := BuildPrepegTx(c.InitBlockHash.Bytes(), testAssetBytes, exporterPubKeyBytes[:], inputAmount, expMS)
 			if err != nil {
 				t.Fatal("could not build pre-peg-in tx")
 			}
@@ -350,7 +351,7 @@ func TestEndToEnd(t *testing.T) {
 			}
 
 			// Build transaction to peg-in funds.
-			pegInTx, err := stellar.BuildPegInTx(exporter.Address(), uniqueNonceHash, inputAmount.HorizonString(), "", "", c.AccountID.Address(), hclient)
+			pegInTx, err := stellar.BuildPegInTx(exporter.Address(), uniqueNonceHash, xlm.Amount(inputAmount).HorizonString(), tt.code, tt.issuer, c.AccountID.Address(), hclient)
 			if err != nil {
 				t.Fatalf("error building peg-in tx: %s", err)
 			}
@@ -370,7 +371,7 @@ func TestEndToEnd(t *testing.T) {
 				}
 				block := item.(*bc.Block)
 				for _, tx := range block.Transactions {
-					if isImportTx(tx, int64(inputAmount), nativeAssetBytes, exporterPub) {
+					if isImportTx(tx, inputAmount, testAssetBytes, exporterPub) {
 						t.Logf("found import tx %x", tx.Program)
 						found = true
 						txresult := txresult.New(tx)
@@ -383,12 +384,12 @@ func TestEndToEnd(t *testing.T) {
 				}
 			}
 			t.Log("submitting pre-export tx...")
-			temp, seqnum, err := SubmitPreExportTx(hclient, exporter, c.AccountID.Address(), native, int64(exportAmount))
+			temp, seqnum, err := SubmitPreExportTx(hclient, exporter, c.AccountID.Address(), testAsset, exportAmount)
 			if err != nil {
 				t.Fatalf("pre-submit tx error: %s", err)
 			}
 			t.Log("building export tx...")
-			exportTx, err := BuildExportTx(ctx, native, int64(exportAmount), int64(inputAmount), temp, anchor, exporterPrv, seqnum)
+			exportTx, err := BuildExportTx(ctx, testAsset, exportAmount, inputAmount, temp, anchor, exporterPrv, seqnum)
 			if err != nil {
 				t.Fatalf("error building retirement tx %s", err)
 			}
