@@ -33,6 +33,7 @@ import (
 	"github.com/interstellar/slingshot/slidechain/store"
 	"github.com/interstellar/starlight/worizon/xlm"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/stellar/go/build"
 	"github.com/stellar/go/clients/horizon"
 	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/xdr"
@@ -57,6 +58,23 @@ func makeAsset(typ xdr.AssetType, code string, issuer string) xdr.Asset {
 		asset, _ = xdr.NewAsset(typ, xdr.AssetAlphaNum12{AssetCode: codeArray, Issuer: issuerAccountID})
 	}
 	return asset
+}
+
+func issueAsset(typ xdr.AssetType, code, issuer, recipient string) error {
+	hclient := horizon.DefaultTestNetClient
+	// newAsset := build.CreditAsset(code, issuer)
+	trustTx, err := build.Transaction(
+		build.SourceAccount{recipient},
+		build.AutoSequence{SequenceProvider: hclient},
+		build.TestNetwork,
+		build.Trust(code, issuer),
+	)
+	if err != nil {
+		return errors.Wrap(err, "building trust tx")
+	}
+	var seed string
+	_, err = stellar.SignAndSubmitTx(hclient, trustTx, seed)
+	return nil
 }
 
 func TestServer(t *testing.T) {
@@ -274,9 +292,9 @@ func TestEndToEnd(t *testing.T) {
 		inputAmount  int64
 		exportAmount int64
 	}{
-		{xdr.AssetTypeAssetTypeNative, "", "", int64(5 * xlm.Lumen), int64(5 * xlm.Lumen)},
-		{xdr.AssetTypeAssetTypeNative, "", "", int64(5 * xlm.Lumen), int64(3 * xlm.Lumen)},
-		// {xdr.AssetTypeAssetTypeCreditAlphanum4, "USD", importTestAccountID, int64(500), int64(500)},
+		// {xdr.AssetTypeAssetTypeNative, "", "", int64(5 * xlm.Lumen), int64(5 * xlm.Lumen)},
+		// {xdr.AssetTypeAssetTypeNative, "", "", int64(5 * xlm.Lumen), int64(3 * xlm.Lumen)},
+		{xdr.AssetTypeAssetTypeCreditAlphanum4, "USD", importTestAccountID, int64(500), int64(500)},
 		// {xdr.AssetTypeAssetTypeCreditAlphanum12, "USDUSD", importTestAccountID, 5 * xlm.Lumen, 5 * xlm.Lumen},
 	}
 	withTestServer(ctx, t, func(ctx context.Context, db *sql.DB, s *submitter, sv *httptest.Server, ch *protocol.Chain) {
