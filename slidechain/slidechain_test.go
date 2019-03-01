@@ -61,21 +61,19 @@ func makeAsset(typ xdr.AssetType, code string, issuer string) xdr.Asset {
 	return asset
 }
 
-func issueAsset(typ xdr.AssetType, code, issuer, recipient string) error {
+func issueAsset(code, issuerAddr, recipAddr, recipSeed string) error {
 	hclient := horizon.DefaultTestNetClient
-	// newAsset := build.CreditAsset(code, issuer)
 	trustTx, err := build.Transaction(
-		build.SourceAccount{recipient},
+		build.SourceAccount{AddressOrSeed: recipAddr},
 		build.AutoSequence{SequenceProvider: hclient},
 		build.TestNetwork,
-		build.Trust(code, issuer),
+		build.Trust(code, issuerAddr),
 	)
 	if err != nil {
 		return errors.Wrap(err, "building trust tx")
 	}
-	var seed string
-	_, err = stellar.SignAndSubmitTx(hclient, trustTx, seed)
-	return nil
+	_, err = stellar.SignAndSubmitTx(hclient, trustTx, recipSeed)
+	return errors.Wrap(err, "submitting trust tx")
 }
 
 func TestServer(t *testing.T) {
@@ -348,6 +346,14 @@ func TestEndToEnd(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error marshaling test asset to xdr: %s", err)
 			}
+			if tt.assetType != xdr.AssetTypeAssetTypeNative {
+				log.Print("issuing non-native test asset...")
+				// err = issueAsset(tt.code, exporter.Address(), accountID.Address(), seed)
+				err = issueAsset(tt.code, accountID.Address(), exporter.Address(), exporter.Seed())
+				if err != nil {
+					t.Fatalf("error issuing test asset: %s", err)
+				}
+			}
 			// Prepare Stellar account to peg-in funds and txvm account to receive funds.
 			expMS := int64(bc.Millis(time.Now().Add(10 * time.Minute)))
 			// Build, submit, and wait on pre-peg-in TxVM tx.
@@ -403,12 +409,12 @@ func TestEndToEnd(t *testing.T) {
 				}
 			}
 			t.Log("submitting pre-export tx...")
-			temp, seqnum, err := SubmitPreExportTx(hclient, exporter, c.AccountID.Address(), testAsset, exportAmount)
+			tempAddr, seqnum, err := SubmitPreExportTx(hclient, exporter, c.AccountID.Address(), testAsset, exportAmount)
 			if err != nil {
 				t.Fatalf("pre-submit tx error: %s", err)
 			}
 			t.Log("building export tx...")
-			exportTx, err := BuildExportTx(ctx, testAsset, exportAmount, inputAmount, temp, anchor, exporterPrv, seqnum)
+			exportTx, err := BuildExportTx(ctx, testAsset, exportAmount, inputAmount, tempAddr, anchor, exporterPrv, seqnum)
 			if err != nil {
 				t.Fatalf("error building retirement tx %s", err)
 			}
@@ -499,7 +505,7 @@ func TestEndToEnd(t *testing.T) {
 				}
 				block := item.(*bc.Block)
 				for _, tx := range block.Transactions {
-					if isPostPegOutTx(tx, native, int64(exportAmount), tempAddr, exporter.Address(), int64(seqnum), retireAnchor[:], exporterPubKeyBytes[:]) {
+					if isPostPegOutTx(tx, testAsset, int64(exportAmount), tempAddr, exporter.Address(), int64(seqnum), retireAnchor[:], exporterPubKeyBytes[:]) {
 						t.Logf("found post-peg-out tx %x", tx.Program)
 						found = true
 						break
