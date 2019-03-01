@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -243,7 +244,7 @@ func TestImport(t *testing.T) {
 			// Without a successful pre-peg-in TxVM tx, the initial input in the import tx will fail.
 			log.Println("building and submitting pre-peg-in tx...")
 			expMS := int64(bc.Millis(time.Now().Add(10 * time.Minute)))
-			prepegTx, err := BuildPrepegTx(c.InitBlockHash.Bytes(), assetXDR, testRecipPubKey, 1, expMS)
+			prepegTx, err := buildPrePegInTx(c.InitBlockHash.Bytes(), assetXDR, testRecipPubKey, 1, expMS)
 			if err != nil {
 				t.Fatal("could not build pre-peg-in tx")
 			}
@@ -259,7 +260,7 @@ func TestImport(t *testing.T) {
 			ready := make(chan struct{})
 			go c.importFromPegIns(ctx, ready)
 			<-ready
-			nonceHash := UniqueNonceHash(c.InitBlockHash.Bytes(), expMS)
+			nonceHash := uniqueNonceHash(c.InitBlockHash.Bytes(), expMS)
 			_, err = db.Exec("INSERT INTO pegs (nonce_hash, amount, asset_xdr, recipient_pubkey, nonce_expms, stellar_tx) VALUES ($1, 1, $2, $3, $4, 1)", nonceHash[:], assetXDR, testRecipPubKey, expMS)
 			if err != nil {
 				t.Fatal(err)
@@ -350,7 +351,7 @@ func TestEndToEnd(t *testing.T) {
 			// Prepare Stellar account to peg-in funds and txvm account to receive funds.
 			expMS := int64(bc.Millis(time.Now().Add(10 * time.Minute)))
 			// Build, submit, and wait on pre-peg-in TxVM tx.
-			prepegTx, err := BuildPrepegTx(c.InitBlockHash.Bytes(), testAssetBytes, exporterPubKeyBytes[:], inputAmount, expMS)
+			prepegTx, err := buildPrePegInTx(c.InitBlockHash.Bytes(), testAssetBytes, exporterPubKeyBytes[:], int64(inputAmount), expMS)
 			if err != nil {
 				t.Fatal("could not build pre-peg-in tx")
 			}
@@ -362,7 +363,7 @@ func TestEndToEnd(t *testing.T) {
 			if err != nil {
 				t.Fatal("unsuccessfully waited on pre-peg-in tx hitting txvm")
 			}
-			uniqueNonceHash := UniqueNonceHash(c.InitBlockHash.Bytes(), expMS)
+			uniqueNonceHash := uniqueNonceHash(c.InitBlockHash.Bytes(), expMS)
 			err = c.insertPegIn(ctx, uniqueNonceHash[:], exporterPubKeyBytes[:], expMS)
 			if err != nil {
 				t.Fatal("could not record peg")
@@ -445,7 +446,7 @@ func TestEndToEnd(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if env.Tx.SourceAccount.Address() != temp {
+					if env.Tx.SourceAccount.Address() != tempAddr {
 						t.Log("source accounts don't match, skipping...")
 						return
 					}
@@ -484,6 +485,29 @@ func TestEndToEnd(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("context timed out: no peg-out tx seen")
 			case <-retire:
+			}
+			// Check for successful post-peg-out txvm tx.
+			// We first split off the difference between inputAmt and exportAmt.
+			// Then, we split off the zero-value for finalize, creating the retire anchor.
+			retireAnchor1 := txvm.VMHash("Split2", anchor)
+			retireAnchor := txvm.VMHash("Split1", retireAnchor1[:])
+			found = false
+			for {
+				item, ok := r.Read(ctx)
+				if !ok {
+					t.Fatal("cannot read a block")
+				}
+				block := item.(*bc.Block)
+				for _, tx := range block.Transactions {
+					if isPostPegOutTx(tx, native, int64(exportAmount), tempAddr, exporter.Address(), int64(seqnum), retireAnchor[:], exporterPubKeyBytes[:]) {
+						t.Logf("found post-peg-out tx %x", tx.Program)
+						found = true
+						break
+					}
+				}
+				if found == true {
+					break
+				}
 			}
 		}
 	})
@@ -529,6 +553,57 @@ func isImportTx(tx *bc.Tx, amount int64, assetXDR []byte, recipPubKey ed25519.Pu
 		return false
 	}
 	// No need to test tx.Log[4], it has to be a finalize entry.
+	return true
+}
+
+// isPostPegOutTx returns whether or not a txvm transaction matches the slidechain post-export tx format.
+//
+// Expected log is
+// {"I", ...}
+// {"X", ...}
+// {"L", ...}
+// {"N", ...}
+// {"R", ...}
+// {"F", ...}
+func isPostPegOutTx(tx *bc.Tx, asset xdr.Asset, amount int64, tempAddr, exporter string, seqnum int64, anchor, pubkey []byte) bool {
+	if len(tx.Log) != 6 {
+		return false
+	}
+	if tx.Log[0][0].(txvm.Bytes)[0] != txvm.InputCode {
+		return false
+	}
+	if tx.Log[1][0].(txvm.Bytes)[0] != txvm.RetireCode {
+		return false
+	}
+	if tx.Log[2][0].(txvm.Bytes)[0] != txvm.LogCode {
+		return false
+	}
+	if tx.Log[3][0].(txvm.Bytes)[0] != txvm.NonceCode {
+		return false
+	}
+	if tx.Log[4][0].(txvm.Bytes)[0] != txvm.TimerangeCode {
+		return false
+	}
+	if tx.Log[5][0].(txvm.Bytes)[0] != txvm.FinalizeCode {
+		return false
+	}
+	assetXDR, err := asset.MarshalBinary()
+	if err != nil {
+		return false
+	}
+	ref := pegOut{
+		AssetXDR: assetXDR,
+		TempAddr: tempAddr,
+		Seqnum:   seqnum,
+		Exporter: exporter,
+		Amount:   amount,
+		Anchor:   anchor,
+		Pubkey:   pubkey,
+	}
+	refdata, err := json.Marshal(ref)
+	if !bytes.Equal(refdata, tx.Log[2][2].(txvm.Bytes)) {
+		return false
+	}
 	return true
 }
 

@@ -51,17 +51,17 @@ pub struct Tx {
 
 /// Represents a verified transaction: a txid and a list of state updates.
 pub struct VerifiedTx {
-    /// Header metadata
+    /// Transaction header
     pub header: TxHeader,
 
     /// Transaction ID
     pub id: TxID,
 
-    // List of inputs, outputs and nonces to be inserted/deleted in the blockchain state.
+    /// Transaction log: a list of changes to the blockchain state (UTXOs to delete/insert, etc.)
     pub log: TxLog,
 }
 
-pub struct VM<'d, CS, D>
+pub(crate) struct VM<'d, CS, D>
 where
     CS: r1cs::ConstraintSystem,
     D: Delegate<CS>,
@@ -88,7 +88,7 @@ where
     variable_commitments: Vec<VariableCommitment>,
 }
 
-pub trait Delegate<CS: r1cs::ConstraintSystem> {
+pub(crate) trait Delegate<CS: r1cs::ConstraintSystem> {
     type RunType;
 
     /// Adds a Commitment to the underlying constraint system, producing a high-level variable
@@ -207,9 +207,9 @@ where
                 Instruction::Mul => self.mul()?,
                 Instruction::Eq => self.eq()?,
                 Instruction::Range(_) => unimplemented!(),
-                Instruction::And => unimplemented!(),
-                Instruction::Or => unimplemented!(),
-                Instruction::Verify => unimplemented!(),
+                Instruction::And => self.and()?,
+                Instruction::Or => self.or()?,
+                Instruction::Verify => self.verify()?,
                 Instruction::Blind => unimplemented!(),
                 Instruction::Reblind => unimplemented!(),
                 Instruction::Unblind => unimplemented!(),
@@ -317,6 +317,28 @@ where
         Ok(())
     }
 
+    fn and(&mut self) -> Result<(), VMError> {
+        let c2 = self.pop_item()?.to_constraint()?;
+        let c1 = self.pop_item()?.to_constraint()?;
+        let c3 = Constraint::And(Box::new(c1), Box::new(c2));
+        self.push_item(c3);
+        Ok(())
+    }
+
+    fn or(&mut self) -> Result<(), VMError> {
+        let c2 = self.pop_item()?.to_constraint()?;
+        let c1 = self.pop_item()?.to_constraint()?;
+        let c3 = Constraint::Or(Box::new(c1), Box::new(c2));
+        self.push_item(c3);
+        Ok(())
+    }
+
+    fn verify(&mut self) -> Result<(), VMError> {
+        let constraint = self.pop_item()?.to_constraint()?;
+        constraint.verify(self.delegate.cs())?;
+        Ok(())
+    }
+
     fn r#const(&mut self) -> Result<(), VMError> {
         let data = self.pop_item()?.to_data()?.to_bytes();
         let scalar = SliceReader::parse(&data, |r| r.read_scalar())?;
@@ -360,8 +382,10 @@ where
         Ok(())
     }
 
+    /// _qty flv data pred_ **issue** → _contract_
     fn issue(&mut self) -> Result<(), VMError> {
         let predicate = self.pop_item()?.to_data()?.to_predicate()?;
+        let metadata = self.pop_item()?.to_data()?;
         let flv = self.pop_item()?.to_variable()?;
         let qty = self.pop_item()?.to_variable()?;
 
@@ -369,7 +393,7 @@ where
         let (qty_point, _) = self.attach_variable(qty)?;
 
         self.delegate.verify_point_op(|| {
-            let flv_scalar = Value::issue_flavor(&predicate);
+            let flv_scalar = Value::issue_flavor(&predicate, metadata);
             // flv_point == flavor·B    ->   0 == -flv_point + flv_scalar·B
             PointOp {
                 primary: Some(flv_scalar),
