@@ -101,7 +101,7 @@ impl CounterpartyCommitted {
         //   a_i = multikey.factor_for_key(self.pubkey)
         //   X_i = self.pubkey
         let S_i = share * RISTRETTO_BASEPOINT_POINT;
-        let c_i = context.challenge(&self.pubkey, &mut transcript);
+        let c_i = context.challenge(&self.pubkey, transcript);
         let X_i = self.pubkey.0.decompress().ok_or(MusigError::InvalidPoint)?;
 
         if S_i != self.commitment.0 + c_i * X_i {
